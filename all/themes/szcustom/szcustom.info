@@ -1,0 +1,4 @@
+name = SZcustom
+description = Hatch based theme for photography portfolio.
+core = 7.x
+engine = phptemplate

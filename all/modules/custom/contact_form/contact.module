@@ -1,0 +1,55 @@
+<?php
+/**
+  * Implements hook_menu
+  */
+function contact_form_menu() {
+  $items['contact'] = array(
+    'title' => 'Contact',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('contact_form'),
+    'access callback' => TRUE,
+    'type' => MENU_NORMAL_ITEM,
+  );
+  
+    return $items;
+ }
+
+/**
+ * Form callback.
+ *
+ * Contact form for customers
+ */
+function contact_form($form, &$form_state) {
+  $form['name'] = array(
+    '#title' => t('Name'),
+    '#type' => 'textfield',
+    '#required' => TRUE,
+  );
+  $form['email'] = array(
+    '#title' => t('Email adress'),
+    '#type' => 'textfield',
+    '#required' => TRUE,
+  );
+  $form['Phone Number'] = array(
+    '#title' => t('Phone Number'),
+    '#type' => 'textfield',
+    '#required' => TRUE,
+  );
+  $form['Message'] = array(
+    '#title' => t('Message'),
+    '#type' => 'textarea',
+    '#size' => 40,
+    '#maxlength' => 300,
+    '#required' => TRUE,
+  );
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Submit'),
+  );
+
+  return $form;
+}
+
+/**
+ * Validation callback for manual_redeem form.
+ */

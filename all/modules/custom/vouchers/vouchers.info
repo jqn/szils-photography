@@ -1,0 +1,5 @@
+name = Vouchers
+description = Redeem vouchers manual by id.
+package = Firstnod
+core = 7.x
+files[] = vouchers.module

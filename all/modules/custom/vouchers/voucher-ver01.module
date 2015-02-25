@@ -1,0 +1,58 @@
+<?php
+/**
+  * Implements hook_menu
+  */
+function vouchers_menu() {
+  $items['vouchers'] = array(
+    'title' => 'Redeem Voucher',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('vouchers_redeem_form'),
+    'access callback' => TRUE,
+    'type' => MENU_NORMAL_ITEM,
+  );
+  
+    return $items;
+ }
+
+/**
+* Define Form and content wrapper.
+*/
+function vouchers_redeem_form($form, &$form_state) {
+$form['voucher_id'] = array(
+    '#title' => t('Please enter voucher ID.'),
+    '#type' => 'textfield',
+  );
+  $form['voucher_wrapper'] = array(
+    '#type' => 'markup',
+    '#prefix' => '<div id="voucher_form_ajax_wrapper">',
+    '#suffix' => '</div>',
+  );
+ 
+  if( (isset($form_state['values']['voucher_id'])) && ($form_state['values']['voucher_id'] != '') ) {
+    $form['voucher_wrapper']['#markup'] = $form_state['values']['voucher_id'];
+  }
+ 
+  $form['submit'] = array(
+    '#type' => 'button',
+    '#value' => t('Go'),
+    '#ajax' => array(
+      'callback' => 'vouchers_form_ajax_callback',
+      'wrapper' => 'voucher_form_ajax_wrapper',
+    ),
+  );
+ 
+  return $form;
+}
+
+/**
+* Callback function
+*/
+function vouchers_form_ajax_callback($form, $form_state) {
+  return $form['voucher_wrapper'];
+}
+
+/**************************************************
+  quick view via ajax
+**************************************************/
+
+

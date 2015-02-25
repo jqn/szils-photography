@@ -1,0 +1,60 @@
+<?php
+/**
+  * Implements hook_menu
+  */
+function vouchers_menu() {
+  $items['vouchers'] = array(
+    'title' => 'Redeem Voucher',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('vouchers_form'),
+    'access callback' => TRUE,
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+    return $items;
+ }
+
+/**
+* Define Form
+*/
+function vouchers_form() {
+  $form['redeem'] = array(
+    '#title' => t('Redeem vouchers by id'),
+    '#type' => 'textfield',
+    '#description' => t('Please enter your voucher ID.'),
+  );
+  $form['submit']= array(
+    '#type' => 'submit',
+    '#value' => t('Submit')
+   );
+
+  return $form;
+}
+
+/**
+ * Validates manual_redeem form, check for empty value.
+ */
+function vouchers_form_validate($form, &$form_state) {
+  if ($form_state['values']['redeem'] == NULL) {
+    // Notify the form API this field has failed validation.
+    form_set_error('redeem',
+      t('Please enter a voucher ID.')
+      );
+  }
+}
+
+/**
+ * manual_redeem redirect after submission.
+ */
+function vouchers_form_submit($form, &$form_state) { 
+  // if (!empty($form_state['values']['redeem'])) {
+  //   return 'Subscribed !';
+  // }
+  // else {
+  //   return $form;
+  // }
+  $voucher_id = $form_state['values']['redeem'];
+  drupal_set_message(t('Status for voucher ID: %voucher_id.',
+    array('%voucher_id' => $voucher_id)));
+  drupal_goto('voucher/redeem/' . $voucher_id);
+}

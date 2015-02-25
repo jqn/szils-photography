@@ -1,0 +1,5 @@
+name = Contact
+description = Contact me.
+package = szcustom
+core = 7.x
+files[] = contact_form.module

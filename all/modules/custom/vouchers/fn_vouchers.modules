@@ -1,0 +1,759 @@
+<?php
+/**
+ * @file fn_vouchers.module
+ *
+ * Provides core FN Vouchers functionality.
+ */
+
+define('FN_VOUCHERS_REDEEM_URL_BASE', 'voucher/redeem');
+define('FN_VOUCHERS_CONSUMER_VIEWS_VIEW_MAIL', 'vouchers_single');
+define('FN_VOUCHERS_CONSUMER_VIEWS_DISPLAY_MAIL', 'embed_mail');
+define('FN_VOUCHERS_MERCHANT_VIEWS_VIEW_REDEEM', 'merchant_views_voucher_redeem');
+define('FN_VOUCHERS_MERCHANT_VIEWS_DISPLAY_REDEEM', 'embed_1');
+define('FN_VOUCHERS_CLAIM_ERROR_LOGGED_OUT', 1);
+define('FN_VOUCHERS_CLAIM_ERROR_UNPUBLISHED', 2);
+define('FN_VOUCHERS_CLAIM_ERROR_NO_INVENTORY', 3);
+define('FN_VOUCHERS_CLAIM_ERROR_USER_LIMIT', 4);
+
+/**
+ * Implements hook_menu().
+ */
+function fn_vouchers_menu() {
+  // Voucher claim link callback.
+  $items['voucher/claim/%node'] = array(
+    'title' => t('Claim Voucher'),
+    'page callback' => 'fn_vouchers_voucher_claim_callback',
+    'page arguments' => array(2, 3),
+    'access callback' => 'fn_vouchers_can_claim_voucher',
+    'access arguments' => array(2, 3),
+  );
+
+  // Voucher redeem link distributor callback.
+  $items['voucher/redeem/%fn_vouchers_voucher'] = array(
+    'title' => t('Redeem Voucher'),
+    'page callback' => 'fn_vouchers_voucher_redeem_preprocess_callback',
+    'page arguments' => array(2),
+    'access callback' => 'fn_vouchers_can_redeem_voucher',
+    'access arguments' => array(2),
+  );
+
+  // Voucher redeem: accept link callback.
+  $items['voucher/redeem/%fn_vouchers_voucher/accept'] = array(
+    'title' => t('Redeem Voucher'),
+    'page callback' => 'fn_vouchers_voucher_redeem_callback',
+    'page arguments' => array(2),
+    'access callback' => 'fn_vouchers_can_redeem_voucher',
+    'access arguments' => array(2),
+  );
+  // Only want these to be present during development when
+  // Debug Mode is TRUE.
+  $items['admin/config/system/voucher-mail-settings'] = array(
+    'title' => t('Toggle Debug mode for voucher emails'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('fn_voucher_settings_config'),
+    'access callback' => 'user_access',
+    'access arguments' => array('administer site configuration'),
+  );
+  // Items for viewing emails in-browser.
+  $items['email-preview'] = array(
+    'title' => t('Voucher Preview'),
+    'page callback' => 'fn_vouchers_email_preview',
+    'page arguments' => array(1, 2),
+    'access callback' => 'fn_vouchers_email_preview_access',
+  );
+  // redeem by voucher id menu item.
+  // uses manual_redeem_form.
+  $items['voucher/redeem/manual'] = array(
+    'title' => t('Redeem Vouchers'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('manual_redeem_form'),
+    'access callback' => 'user_access',
+    'access arguments' => array(1),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  return $items;
+}
+
+/**
+ * Page Callback for manual_redeem_form.
+ */
+function manual_redeem_form() {
+  $form['redeem'] = array(
+    '#title' => t('Please enter your voucher ID.'),
+    '#type' => 'textfield',
+    '#description' => t('This form allows merchants to redeem vouchers by entering an id number.'),
+    );
+  // Creates empty field to populate with dynamic content.
+  $form['empty_div'] = array(
+    '#type' => 'markup',
+    '#prefix' => '<div id="manual_redeem_form_wrapper">',
+    '#suffix' => '</div>',
+    );
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Go'),
+  );
+
+  return $form;
+}
+
+/**
+ * Validates manual_redeem form, check for empty value.
+ */
+function manual_redeem_form_validate($form, &$form_state) {
+  if ($form_state['values']['redeem'] == NULL) {
+    // Notify the form API this field has failed validation.
+    form_set_error('redeem',
+      t('Please enter a voucher ID.')
+      );
+  }
+}
+
+/**
+ * manual_redeem redirect after submission.
+ */
+function manual_redeem_form_submit($form, &$form_state) { 
+  // if (!empty($form_state['values']['redeem'])) {
+  //   return 'Subscribed !';
+  // }
+  // else {
+  //   return $form;
+  // }
+  $voucher_id = $form_state['values']['redeem'];
+  drupal_set_message(t('Status for voucher ID: %voucher_id.',
+    array('%voucher_id' => $voucher_id)));
+  drupal_goto('voucher/redeem/' . $voucher_id);
+}
+
+/**********************************************************/
+/**********************************************************/
+
+/**
+ * Access callback for email debug page(s)
+ */
+function fn_vouchers_email_preview_access() {
+  $debug_mode = variable_get('fn_vouchers_email_debug_mode', FALSE);
+  return ($debug_mode && user_access('administer site configuration'));
+}
+
+/**
+ * Access callback for claiming vouchers.
+ *
+ * Checks for user and node restrictions.
+ *
+ * Pretty agressive with redirects and messages, passing $system = TRUE will
+ *  bypass all that and simply return a TRUE/FALSE on whether the user should
+ *  have access.
+ *
+ * @param $node
+ *   The offer node object.
+ * @param $qty
+ *   The number of vouchers to be claimed.
+ * @param $system
+ *   A variable set to true to suppress user feedback/redirect logic.
+ * @param $return_reason
+ *   A variable set to true to return the reason for failure, rather than just
+ *   a boolean. An empty array here will mean the same as returning true.
+ */
+function fn_vouchers_can_claim_voucher($node, $qty = 1, $system = FALSE, $return_reason = FALSE) {
+  global $user;
+  $return = TRUE;
+  $reason = array();
+
+  // Users must be logged-in to claim offers.
+  if ($user->uid == 0) {
+    // If this is not a system call, direct user to login page.
+    if (!$system) {
+      drupal_set_message(t('You must be logged in to claim an offer. Please login or !register.', array('!register' => l(t('register'), 'user/consumer'))));
+      // Force the user to login before going back to the destination.
+      $options['query'] = drupal_get_destination();
+      unset($_GET['destination']);
+      drupal_goto('user/login', $options);
+    }
+    $return = FALSE;
+    $reason[] = FN_VOUCHERS_CLAIM_ERROR_LOGGED_OUT;
+  }
+
+  // Node must be published.
+  if ($node->status == 0) {
+    if (!$system) {
+      drupal_set_message(t('This offer can no longer be claimed.'));
+      drupal_goto();
+    }
+    $return = FALSE;
+    $reason[] = FN_VOUCHERS_CLAIM_ERROR_UNPUBLISHED;
+  }
+
+  // Check that the hasn't been maxed overall.
+  $total_count = fn_vouchers_num_claimed_by_offer($node);
+  if ($total_count + $qty > $node->field_quantity_units_offered['und'][0]['value']) {
+    if (!$system) {
+      drupal_set_message(t('Your requested quantity exceeds the total available for this offer.'));
+      drupal_goto();
+    }
+    $return = FALSE;
+    $reason[] = FN_VOUCHERS_CLAIM_ERROR_NO_INVENTORY;
+  }
+
+  // And verify this user is able to claim an additional offer.
+  $user_count = fn_vouchers_num_claimed_by_offer($node, $user);
+  if ($user_count + $qty > $node->field_maximum_claims_per_user['und'][0]['value']) {
+    if (!$system) {
+      drupal_set_message(t('Your requested quantity exceeds the total allowed per user for this offer.'));
+      drupal_goto();
+    }
+    $return = FALSE;
+    $reason[] = FN_VOUCHERS_CLAIM_ERROR_USER_LIMIT;
+  }
+
+
+  return ($return_reason) ? $reason : $return;
+}
+
+/**
+ * Access callback for redeeming vouchers.
+ *
+ * Checks for user and offer node matching against the voucher to ensure .
+ *
+ * Pretty agressive with redirects and messages, passing $system = TRUE will
+ *  bypass all that and simply return a TRUE/FALSE on whether the user should
+ *  have access.
+ *
+ * @param $voucher
+ *   The voucher object to be redeemed.
+ * @param $system
+ *   A variable set to true to suppress user feedback/redirect logic.
+ */
+function fn_vouchers_can_redeem_voucher($voucher, $system = FALSE) {
+  global $user;
+
+  // Make sure the the user is a logged in merchant.
+  if ($user->uid == 0) {
+    if (!$system) {
+      drupal_set_message(t('You must be logged in to your merchant account to redeem vouchers. Please login.'));
+      drupal_goto('user/login', array('query'=>drupal_get_destination()) );
+    }
+    return FALSE;
+  }
+
+  // If the user is logged in but is not a merchant, this can't be their offer.
+  // This is probably a consumer playing with the QR code.
+  if (fn_user_workflows_get_user_type($user) != 'merchant') {
+    if (!$system) {
+      drupal_set_message(t('Only the merchant can redeem their vouchers.'));
+      drupal_goto('voucher/view/' . $voucher->voucher_id);
+    }
+    return FALSE;
+  }
+  // Ensure this is a valid voucher and owned by this user.
+  if (isset($voucher->campaign_id)) {
+    $offer = node_load($voucher->campaign_id);
+    // Only admins can view redeem other merchants' vouchers.
+    if ($offer->uid != $user->uid && !user_access('administer users')) {
+      if (!$system) {
+        drupal_set_message(t('You cannot redeem vouchers from another merchant. You can only redeem your own vouchers!'));
+        drupal_goto('voucher/view/' . $voucher->voucher_id);
+      }
+      return FALSE;
+    }
+
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+/**
+ * Page callback for claiming vouchers.
+ *
+ * Claims $qty new vouchers.
+ */
+function fn_vouchers_voucher_claim_callback($node, $qty, $system = FALSE) {
+  global $user;
+
+  $qty = ($qty) ? $qty : 1;
+  for ($i = 0; $i < $qty; $i++) {
+    $voucher = fn_vouchers_claim_voucher($node, $user);
+  }
+
+  if (!empty($voucher->voucher_id)) {
+    $success = TRUE;
+    $title = t('Congratulations!');
+    $message = t('Your @qty_offers been claimed! You will receive an email shortly with a copy of the voucher. You can always find your free vouchers online or on your mobile device by selecting My Vouchers.', array(
+        '@qty_offers' => format_plural($qty, t('free voucher has'), t('free vouchers have'))
+      )
+    );
+  }
+  else {
+    $success = FALSE;
+    $title = t('There was a problem...');
+    $message = t('Sorry, your offer could not be claimed. Please try again and let us know if the issue persists.');
+    watchdog('fn_offers', 'Could not create a voucher record. Details: <pre>!details</pre>', array('!details' => print_r(array(
+        'user' => $user,
+        'voucher' => $voucher,
+        'offer_node' => $node,
+        'qty' => $qty,
+      ), TRUE)), WATCHDOG_ERROR);
+  }
+
+  // If it's the user performing this operation.
+   if ($system !== TRUE) {
+    // Tell them what happened.
+    drupal_set_message($message);
+    // Send the user back to the page they came from (hopefully).
+    drupal_goto();
+   }
+   else {
+     return array(
+       'success' => $success,
+       'title' => $title,
+       'message' => $message,
+     );
+   }
+}
+
+/**
+ * Page callback for redeeming vouchers.
+ */
+function fn_vouchers_voucher_redeem_preprocess_callback($voucher) {
+  return views_embed_view(FN_VOUCHERS_MERCHANT_VIEWS_VIEW_REDEEM, FN_VOUCHERS_MERCHANT_VIEWS_DISPLAY_REDEEM, $voucher->voucher_id);
+}
+
+/**
+ * Page callback for redeeming vouchers.
+ */
+function fn_vouchers_voucher_redeem_callback($voucher) {
+  fn_vouchers_voucher_redeem($voucher);
+
+  drupal_set_message(t('Voucher successfully redeemed.'));
+  // Send the user back to the page they came from (hopefully).
+  drupal_goto();
+}
+
+/**
+ * Create the voucher record.
+ */
+function fn_vouchers_claim_voucher($node, $account) {
+  $voucher = new stdClass();
+  $voucher->user_id = $account->uid;
+  $voucher->campaign_id = $node->nid;
+
+  // Save to get the voucher_id.
+  fn_vouchers_voucher_save($voucher);
+
+  // Add the short url.
+  $dest_url = FN_VOUCHERS_REDEEM_URL_BASE . '/' . $voucher->voucher_id;
+  $long_url = url($dest_url, array('absolute' => TRUE));
+  $shorten = shurly_shorten($long_url);
+  $voucher->short_url = $shorten['shortUrl'];
+
+  // Save again with the short URL.
+  $result = fn_vouchers_voucher_save($voucher);
+
+  // Use Rules to send the voucher email if it was saved successfully.
+  if ($voucher->voucher_id) {
+    rules_invoke_component('rules_send_voucher_email', $account, $voucher->voucher_id);
+  }
+
+  return $voucher;
+}
+
+/**
+ * A quasi wrapper around the data module handling of saving.
+ *
+ * We're actually bypassing some functions it has because there is no (easy)
+ *  way to determine the voucher_id immediately post save, which is a need for
+ *  our usecase. This is a slightly more efficient alternative which recieves
+ *  the $voucher object by reference and returns a modified version with the
+ *  new voucher_id.
+ */
+function fn_vouchers_voucher_save(&$voucher) {
+  $handler = _fn_vouchers_get_table_handler();
+  if (isset($voucher->voucher_id)) {
+    $result = drupal_write_record($handler->table, $voucher, array('voucher_id'));
+  }
+  else {
+    $result = drupal_write_record($handler->table, $voucher);
+
+  }
+  return $result;
+}
+
+/**
+ * Loading wrapper for Vouchers.
+ *
+ * Will return an object if there is only 1 record, or an array of objects for multiple
+ */
+function fn_vouchers_voucher_load($vid = NULL, $uid = NULL, $cid = NULL) {
+  $handler = _fn_vouchers_get_table_handler();
+
+  if ($vid) {
+    $vouchers = $handler->load(array('voucher_id' => $vid));
+  }
+  else {
+    $conditions = array();
+
+    if ($uid) {
+      $conditions['user_id'] = $uid;
+    }
+    if ($cid) {
+      $conditions['campaign_id'] = $cid;
+    }
+
+    $vouchers = $handler->load($conditions);
+  }
+
+  // Data will always return an array of voucher records, but typically we're
+  // only wanting to deal with one.
+  if (is_array($vouchers)) {
+    foreach ($vouchers as $voucher) {
+      $ret_vouchers[] = (object)$voucher;
+    }
+
+    $vouchers = (count($ret_vouchers) == 1) ? array_pop($ret_vouchers) : $ret_vouchers;
+  }
+
+  return $vouchers;
+}
+
+/**
+ * Increment number of redemptions and save.
+ */
+function fn_vouchers_voucher_redeem($voucher) {
+  $voucher->redeem_count = 1 + (int)$voucher->redeem_count;
+  fn_vouchers_voucher_save($voucher);
+}
+
+/**
+ * Gets the table handler class for the data module.
+ */
+function _fn_vouchers_get_table_handler() {
+  $table = data_get_table('vouchers');
+  return $table->handler();
+}
+
+/**
+ * Gets the number of vouchers claimed for the node.
+ *
+ * Basically just a row count. If the user parameter is given, restricts count
+ *  to that user.
+ */
+function fn_vouchers_num_claimed_by_offer($node, $user = NULL) {
+  $count = 0;
+
+  if ($node->type == 'offer') {
+    $query = db_select('vouchers', 'v')->fields('v', array('voucher_id'));
+    $query->condition('campaign_id', $node->nid,'=');
+
+    if ($user) {
+      $query->condition('user_id', $user->uid,'=');
+    }
+
+    // Counting rows only.
+    $result = $query->countQuery()->execute();
+    $count = $result->fetchField();
+  }
+
+  return $count;
+}
+
+/**
+ * Determines the number of times an offer has been redeemed.
+ */
+function fn_vouchers_num_redeemed_by_offer($node, $account = NULL) {
+  $count = 0;
+
+  if ($node->type == 'offer') {
+    $query = db_select('vouchers', 'v');
+    $query->addExpression('SUM(redeem_count)', 'count');
+    $query->condition('campaign_id', $node->nid,'=');
+
+    if ($account) {
+      $query->condition('user_id', $account->uid,'=');
+    }
+
+    $result = $query->execute();
+    $count = $result->fetchField();
+  }
+
+  return $count;
+}
+
+/**
+ * Build QR image tags with the URL pointing to Google's QR service.
+ */
+function fn_vouchers_get_qr($link) {
+  // Not our variables per se, but we can use them...
+  $w = variable_get('google_qr_code_width', '250');
+  $h = variable_get('google_qr_code_height', '250');
+
+  $url = urlencode($link);
+
+  $google_qr_image_url = "https://chart.googleapis.com/chart?chs=" . $w . "x" . $h . "&cht=qr&chl=" . $url . '&chld=H|0';
+
+  return theme('image', array(
+          'path' => $google_qr_image_url,
+          'alt' => $link,
+          'width' => $w,
+          'height' => $h,
+          'attributes' => array('class' => 'googleQRcode'),
+        ));
+}
+
+/**
+ * Function to return a voucher email using Views for output.
+ */
+function fn_vouchers_mail_voucher($voucher_id) {
+  return views_embed_view(FN_VOUCHERS_CONSUMER_VIEWS_VIEW_MAIL, FN_VOUCHERS_CONSUMER_VIEWS_DISPLAY_MAIL, $voucher_id);
+}
+
+/**
+ * Implements hook_ds_fields_info().
+ *
+ * Define fields. These fields are not overridable through the interface.
+ * If you want those, look at hook_ds_custom_fields_info().
+ *
+ * @param $entity_type
+ *   The name of the entity which we are requesting fields for, e.g. 'node'.
+ *
+ * @return $fields
+ *   A collection of fields which keys are the entity type name and values
+ *   a collection fields.
+ *
+ * @see ds_get_fields()
+ */
+function fn_vouchers_ds_fields_info($entity_type) {
+  $fields = array();
+
+  $fields['quantity_available'] = array(
+    'title' => t('Offer Quantity Remaining'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('offer|*'),
+    'function' => 'fn_vouchers_quantity_available_text',
+    // This stuff doesn't really seem to work...
+    'properties' => array(
+      'entity_render_key' => 'quantity_available',
+      'settings' => array(
+        'message_type' => array(
+          'type' => 'select',
+          'options' => array(
+            'long' => t('Long'),
+            'short' => t('Short'),
+          ),
+        ),
+      ),
+      'default' => array('message_type' => 'long'),
+    ),
+  );
+
+  $fields['claim_offer'] = array(
+    'title' => t('Claim Offer Button'),
+    'field_type' => DS_FIELD_TYPE_FUNCTION,
+    'ui_limit' => array('offer|full', 'offer|drupalgap'),
+    'function' => 'fn_vouchers_claim_offer_button',
+  );
+
+  return array('node' => $fields);
+}
+
+
+/**
+ * Field output callback for claim offer buttons.
+ */
+function fn_vouchers_claim_offer_button($field, $render = TRUE) {
+  global $user;
+  $node = $field['entity'];
+
+  if ($node->type == 'offer') {
+    $claim_href = 'voucher/claim/' . $node->nid;
+    // Provide a couple of alternate URLs for the claim button if user cannot
+    // claim the offer.
+    if ($reason = fn_vouchers_can_claim_voucher($node, 1, TRUE, TRUE)) {
+      // If no quantity remaining, don't show the link.
+      if (array_intersect(array(FN_VOUCHERS_CLAIM_ERROR_NO_INVENTORY, FN_VOUCHERS_CLAIM_ERROR_USER_LIMIT), $reason)) {
+        return;
+      }
+      // Unpublished, show for preview purposes.
+      elseif (in_array(FN_VOUCHERS_CLAIM_ERROR_UNPUBLISHED, $reason)) {
+        $claim_href = '';
+        $claim_fragment = TRUE;
+      }
+      // Logged out users will be redirected to login page upon clicking link.
+    }
+
+    try {
+      $node_wrapper = entity_metadata_wrapper('node', $node);
+      $max_qty = $node_wrapper->field_maximum_claims_per_user->value();
+      $inventory = $node_wrapper->field_quantity_units_offered->value();
+
+      // Claimed so far by this user.
+      $claimed_by_user = (int)fn_vouchers_num_claimed_by_offer($node, $user);
+      // Set a new max quantity if this is over 0;
+      $max_qty -= $claimed_by_user;
+
+      // Claimed so far total.
+      $claimed_total = (int)fn_vouchers_num_claimed_by_offer($node);
+      $inventory -= $claimed_total;
+
+      // Set the max the user can select to the smallest availability number.
+      $max_qty = min($max_qty, $inventory);
+
+      // Only show this select if there are mulitple options.
+      if ($max_qty > 1) {
+        $options = array();
+
+        // Add a quantity item to the select of each allowed quantity.
+        for ($i = 1; $i <= $max_qty; $i++) {
+          $options[$i] = $i;
+        }
+
+        $claim_offer_qty = array(
+          '#type' => 'select',
+          '#options' => $options,
+          // The select doesn't do anything without JS enabled,
+          // which modifies the link to include the qty.
+          '#attached' => array('js' => array(
+            drupal_get_path('module', 'fn_vouchers') . '/fn_vouchers.js',
+          )),
+        );
+      }
+      // If the user can't add new items, don't show the claim offer link.
+      // This really shouldn't happen with the permission callback,
+      // but just in case.
+      elseif ($max_qty < 1) {
+        drupal_set_message(t("Sorry, but you can't claim this offer any longer."), 'warning');
+        return;
+      }
+    }
+    catch (EntityMetadataWrapperException $exc) {
+      watchdog(
+        'fn_vouchers',
+        'See ' . __FUNCTION__ . '() <pre>' .  $exc->getTraceAsString() . '</pre>',
+        NULL, WATCHDOG_ERROR
+      );
+    }
+
+    $content['claim_offer'] = array(
+      '#type' => 'container',
+      '#attributes' => array('class' => array('claim-offer-inner')),
+      '#prefix' => '<div class="claim-offer-wrapper">',
+      '#suffix' => '</div>',
+      '#weight' => 100,
+    );
+
+    // Only display the quantity if it's available (is over 1).
+    if (isset($claim_offer_qty)) {
+      $content['claim_offer']['claim_offer_qty'] = $claim_offer_qty;
+    }
+
+    $content['claim_offer']['claim_offer_button'] = array(
+      '#theme' => 'link',
+      '#text' => t('Claim Free Voucher'),
+      '#path' => $claim_href,
+      '#options' => array(
+        'query' => drupal_get_destination(),
+        'html' => FALSE,
+        'attributes' => array(
+          'class' => array('claim-offer-link'),
+          'data-replacement-path' => $claim_href . '/[qty]',
+        ),
+      ),
+    );
+
+    if (isset($claim_fragment)) {
+      $content['claim_offer']['claim_offer_button']['#options']['fragment'] = ' ';
+      $content['claim_offer']['claim_offer_button']['#options']['external'] = TRUE;
+      unset($content['claim_offer']['claim_offer_button']['#options']['query']);
+    }
+  }
+
+  // Return the markup, or the renderable array if it's asked for.
+  return ($render) ? render($content) : $content;
+}
+
+/**
+ * Field output callback for claim offer buttons.
+ */
+function fn_vouchers_quantity_available_text($field) {
+  global $user;
+  $node = $field['entity'];
+
+  if ($node->type == 'offer') {
+    try {
+      $node_wrapper = entity_metadata_wrapper('node', $node);
+      $inventory = $node_wrapper->field_quantity_units_offered->value();
+
+      // Claimed so far total.
+      $claimed_total = (int)fn_vouchers_num_claimed_by_offer($node);
+      // New inventory is remaining.
+      $inventory -= $claimed_total;
+
+      // Short setting doesn't seem to work.
+      if ($field['properties']['settings']['message_type'] == 'short') {
+        $message = '!inventory Available';
+      }
+      else {
+        $message = 'Only !inventory Vouchers Remaining!';
+      }
+    }
+    catch (EntityMetadataWrapperException $exc) {
+      watchdog(
+        'fn_vouchers',
+        'See ' . __FUNCTION__ . '() <pre>' .  $exc->getTraceAsString() . '</pre>',
+        NULL, WATCHDOG_ERROR
+      );
+    }
+  }
+
+  if (isset($inventory) && $inventory > 0) {
+    $content = array(
+      '#markup' => t($message, array(
+        '!inventory' => '<span class="inventory-number">' . $inventory . '</span>'
+        )),
+      '#prefix' => '<div class="offer-inventory-message">',
+      '#suffix' => '</div>',
+    );
+  }
+
+  return render($content);
+}
+
+/**
+ * Callback handler for config page.
+ */
+function fn_voucher_settings_config($form_state) {
+  $debug = variable_get('fn_vouchers_email_debug_mode', FALSE);
+  $form['fn_vouchers_email_debug_mode'] = array(
+    '#title' => t('Email Debug Mode'),
+    '#description' => t('TRUE sets to debug mode and emails aren\'t sent'),
+    '#type' => 'checkbox',
+    '#default_value' => $debug,
+  );
+  return system_settings_form($form);
+}
+
+function fn_vouchers_email_preview($key, $id) {
+  // Set some things to default so we only have to set them if an override is desired.
+  $to = 'devs@clikfocus.com';
+  $from = 'devs@clikfocus.com';
+  $subject = 'Here\'s your Voucher from Firstnod!';
+  switch ($key) {
+    case 'voucher_single':
+      $to = 'devs@clikfocus.com';
+      $from = 'devs@clikfocus.com';
+      $subject = 'Here\'s your Voucher from Firstnod!';
+      $message = fn_vouchers_mail_voucher($id);
+      break;
+    case 'offer_notification' :
+      $subject = 'A New Offer Matches Your Search Criteria!';
+      $offer_node = node_load($id);
+      $message = print render(node_view($offer_node, 'mail'));
+      break;
+    default :
+      return '<h1>You need to specify a key and id</h1>';
+  }
+  $message = drupal_mail('fn_vouchers', $key, $to, LANGUAGE_NONE,
+    array('message' => $message, 'subject' => $subject), $to, FALSE);
+   return print_r($message);
+}
